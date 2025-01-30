@@ -19,11 +19,13 @@
         do { } while (0)
 #endif
 
+// Structure to represent a message node in the queue
 typedef struct MessageNode {
     char message[BUFFER_SIZE];
     struct MessageNode *next;
 } MessageNode;
 
+// Structure to represent a client
 typedef struct {
     int fd;                 // Client socket descriptor
     int id;                 // Client ID (1 to MAX_CLIENTS)
@@ -31,9 +33,11 @@ typedef struct {
     MessageNode *queue_tail; // Message queue tail
 } Client;
 
+// Global variables
 int max_players, listen_fd;
 Client* clients;
 
+// Function prototypes
 int isInteger(const char *str);
 int enqueue_message(Client *client, const char *message);
 char *dequeue_message(Client *client);
@@ -44,6 +48,7 @@ void cleanup_and_exit(int signum);
 void accept_new_client(int *client_count, int* max_fd, fd_set* temp_set_read, fd_set* temp_set_write);
 
 int main(int argc, char *argv[]) {
+    // Validate command-line arguments
     if (argc != 4) {
         printf("Usage: ./server <port> <seed> <max-number-of-players>\n");
         exit(EXIT_FAILURE);
@@ -57,41 +62,48 @@ int main(int argc, char *argv[]) {
     // Register the SIGINT signal handler
     signal(SIGINT, cleanup_and_exit);
 
+    // Parse command-line arguments
     int port = atoi(argv[1]);
     int seed = atoi(argv[2]);
     max_players = atoi(argv[3]);
 
+    // Initialize random number generator
     srand(seed);
     int target_num = (rand() % 100) + 1;
 
+    // Server address structure
     struct sockaddr_in srv;
 
-    /* create the socket */
+    // Create the socket
     if ((listen_fd = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
 
+    // Configure server address
     srv.sin_family = AF_INET;
     srv.sin_port = htons(port);
     srv.sin_addr.s_addr = htonl(INADDR_ANY);
 
+    // Bind the socket to the server address
     if (bind(listen_fd, (struct sockaddr *) &srv, sizeof(srv)) < 0) {
         perror("bind");
         exit(EXIT_FAILURE);
     }
 
-    // Listen for connections
+    // Listen for incoming connections
     if (listen(listen_fd, 5) < 0) {
         perror("listen");
         close(listen_fd);
         exit(EXIT_FAILURE);
     }
 
+    // Initialize variables for handling clients and file descriptors
     char buffer[BUFFER_SIZE];
     int activity, max_fd, client_count = 0;
     fd_set set_read, set_write, temp_set_read, temp_set_write;
 
+    // Allocate memory for clients
     clients = (Client *) malloc(max_players * sizeof(Client));
     if (!clients) {
         perror("malloc");
@@ -100,33 +112,35 @@ int main(int argc, char *argv[]) {
     }
     memset(clients, 0, max_players * sizeof(Client));
 
+    // Initialize file descriptor sets
     FD_ZERO(&temp_set_read);
     FD_ZERO(&temp_set_write);
     FD_SET(listen_fd, &temp_set_read);
     max_fd = listen_fd;
     int game_over = 0;
 
+    // Main server loop
     while (1) {
         set_read = temp_set_read;
         set_write = temp_set_write;
 
+        // Manage the listen socket based on the number of connected clients
         if (client_count == max_players)
             FD_CLR(listen_fd, &set_read);
         else
             FD_SET(listen_fd, &set_read);
 
+        // Wait for activity on any file descriptor
         activity = select(max_fd + 1, &set_read, &set_write, NULL, NULL);
         if (activity < 0) {
             perror("select");
             cleanup_and_exit(-1);
         }
 
-        // Handle new connection
+        // Handle new client connection
         if (FD_ISSET(listen_fd, &set_read)) {
-            if (client_count < max_players) {
-                printf("Server is ready to read from welcome socket %d\n", listen_fd);
-                accept_new_client(&client_count, &max_fd, &temp_set_read, &temp_set_write);
-            }
+            printf("Server is ready to read from welcome socket %d\n", listen_fd);
+            accept_new_client(&client_count, &max_fd, &temp_set_read, &temp_set_write);
             activity--;
         }
 
@@ -156,6 +170,10 @@ int main(int argc, char *argv[]) {
 
                         // Convert the string to an integer
                         int num = atoi(num_buffer);
+
+                        sprintf(buffer, "Player %d guessed %d\n", clients[i].id, num);
+                        if (broadcast_message(clients, buffer, &temp_set_write, max_fd, -1) < 0)
+                            cleanup_and_exit(-1);
 
                         if (num < target_num)
                             sprintf(buffer, "The guess %d is too low\n", num);
@@ -207,7 +225,7 @@ int main(int argc, char *argv[]) {
     }
 }
 
-
+// Function to check if a string is a valid integer
 int isInteger(const char *str) {
     char *endptr;
 
@@ -226,6 +244,7 @@ int isInteger(const char *str) {
     return 1; // Valid integer
 }
 
+// Function to enqueue a message for a client
 int enqueue_message(Client *client, const char *message) {
     MessageNode *new_node = (MessageNode *)malloc(sizeof(MessageNode));
     if (!new_node) {
@@ -246,6 +265,7 @@ int enqueue_message(Client *client, const char *message) {
     return 0;
 }
 
+// Function to dequeue a message for a client
 char *dequeue_message(Client *client) {
     if (!client->queue) {
         return NULL;
@@ -261,6 +281,7 @@ char *dequeue_message(Client *client) {
     return message;
 }
 
+// Function to free all clients and their message queues
 void free_clients() {
     DEBUG_PRINT("max players; %d\n", max_players);
     for (int i = 0; i < max_players; i++) {
@@ -272,6 +293,7 @@ void free_clients() {
     }
 }
 
+// Function to free a client's message queue
 void free_message_queue(Client* client) {
     MessageNode* current = client->queue;
     MessageNode* next = current;
@@ -283,9 +305,9 @@ void free_message_queue(Client* client) {
     client->queue = client->queue_tail = NULL;
 }
 
+// Function to broadcast a message to all clients
 int broadcast_message(Client* clients, const char *message, fd_set* set_write, int max_fd, int current_client) {
     for (int j = 0; j < max_players; j++) {
-        DEBUG_PRINT("----\n");
         if (clients[j].fd != 0) {
             // Case 1: Broadcast to all clients (including the current client)
             if (current_client == -1) {
@@ -305,6 +327,7 @@ int broadcast_message(Client* clients, const char *message, fd_set* set_write, i
     return 0;
 }
 
+// Function to clean up resources and exit
 void cleanup_and_exit(int signum) {
     free_clients();
     free(clients);
@@ -315,6 +338,7 @@ void cleanup_and_exit(int signum) {
     exit(EXIT_SUCCESS);
 }
 
+// Function to accept a new client connection
 void accept_new_client(int *client_count, int* max_fd, fd_set* temp_set_read, fd_set* temp_set_write) {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
