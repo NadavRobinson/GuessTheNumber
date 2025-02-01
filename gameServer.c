@@ -34,7 +34,7 @@ typedef struct {
 } Client;
 
 // Global variables
-int max_players, listen_fd;
+int max_players, listen_fd, max_fd, target_num, client_count = 0, game_over = 0;
 Client* clients;
 
 // Function prototypes
@@ -46,6 +46,9 @@ void free_message_queue(Client* client);
 int broadcast_message(Client* clients, const char *message, fd_set* set_write, int max_fd, int current_client);
 void cleanup_and_exit(int signum);
 void accept_new_client(int *client_count, int* max_fd, fd_set* temp_set_read, fd_set* temp_set_write);
+void handle_client_input(int i, fd_set *temp_set_read, fd_set *temp_set_write);
+void send_message(int i, fd_set *temp_set_read, fd_set *temp_set_write);
+void update_max_fd();
 
 int main(int argc, char *argv[]) {
     // Validate command-line arguments
@@ -69,7 +72,7 @@ int main(int argc, char *argv[]) {
 
     // Initialize random number generator
     srand(seed);
-    int target_num = (rand() % 100) + 1;
+    target_num = (rand() % 100) + 1;
 
     // Server address structure
     struct sockaddr_in srv;
@@ -99,8 +102,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Initialize variables for handling clients and file descriptors
-    char buffer[BUFFER_SIZE];
-    int activity, max_fd, client_count = 0;
+    int activity;
     fd_set set_read, set_write, temp_set_read, temp_set_write;
 
     // Allocate memory for clients
@@ -117,7 +119,6 @@ int main(int argc, char *argv[]) {
     FD_ZERO(&temp_set_write);
     FD_SET(listen_fd, &temp_set_read);
     max_fd = listen_fd;
-    int game_over = 0;
 
     // Main server loop
     while (1) {
@@ -137,6 +138,8 @@ int main(int argc, char *argv[]) {
             cleanup_and_exit(-1);
         }
 
+        DEBUG_PRINT("%s\n", temp_set_read);
+
         // Handle new client connection
         if (FD_ISSET(listen_fd, &set_read)) {
             printf("Server is ready to read from welcome socket %d\n", listen_fd);
@@ -147,80 +150,24 @@ int main(int argc, char *argv[]) {
         // Handle activity for existing clients
         for (int i = 0; i < max_players && activity > 0; i++) {
             if (clients[i].fd != 0) {
-                // Check for readable data
                 if (FD_ISSET(clients[i].fd, &set_read)) {
+                    // Check for readable data
                     printf("Server is ready to read from player %d on socket %d\n", clients[i].id, clients[i].fd);
+                    handle_client_input(i, &temp_set_read, &temp_set_write);
                     activity--;
-                    char num_buffer[20];
-                    int bytes_read = read(clients[i].fd, num_buffer, sizeof(num_buffer));
-                    if (bytes_read <= 0) {
-                        // Client disconnected
-                        close(clients[i].fd);
-                        FD_CLR(clients[i].fd, &temp_set_read);
-                        FD_CLR(clients[i].fd, &temp_set_write);
-                        free_message_queue(&clients[i]);
-                        client_count--;
-                        sprintf(buffer, "Player %d disconnected\n", clients[i].id);
-                        if (broadcast_message(clients, buffer, &temp_set_write, max_fd, i) < 0)
-                            cleanup_and_exit(-1);
-                        clients[i].id = 0, clients[i].fd = 0;
-                    } else {
-                        // Null-terminate the buffer
-                        num_buffer[bytes_read] = '\0';
-
-                        // Convert the string to an integer
-                        int num = atoi(num_buffer);
-
-                        sprintf(buffer, "Player %d guessed %d\n", clients[i].id, num);
-                        if (broadcast_message(clients, buffer, &temp_set_write, max_fd, -1) < 0)
-                            cleanup_and_exit(-1);
-
-                        if (num < target_num)
-                            sprintf(buffer, "The guess %d is too low\n", num);
-                        else if (num > target_num)
-                            sprintf(buffer, "The guess %d is too high\n", num);
-                        else
-                            sprintf(buffer, "Player %d wins\n", clients[i].id);
-
-                        if (broadcast_message(clients, buffer, &temp_set_write, max_fd, -1) < 0)
-                            cleanup_and_exit(-1);
-                        // Notify all clients of the correct number
-                        if (num == target_num) {
-                            game_over = 1;
-                            sprintf(buffer, "The correct guessing is %d\n", num);
-                            if (broadcast_message(clients, buffer, &temp_set_write, max_fd, -1) < 0) {
-                                cleanup_and_exit(-1);
-                            }
-                        }
-                    }
                 }
-
-                // Check for writable data
                 if (FD_ISSET(clients[i].fd, &set_write)) {
+                    // Check for writable data
                     printf("Server is ready to write to player %d on socket %d\n", clients[i].id, clients[i].fd);
+                    send_message(i, &temp_set_read, &temp_set_write);
                     activity--;
-                    char *message = dequeue_message(&clients[i]);
-                    if (message) {
-                        write(clients[i].fd, message, strlen(message));
-                        free(message);
-                    }
-
-                    if (!clients[i].queue) {
-                        FD_CLR(clients[i].fd, &temp_set_write);
-                        if (game_over) {
-                            close(clients[i].fd);
-                            FD_CLR(clients[i].fd, &temp_set_read);
-                            FD_CLR(clients[i].fd, &temp_set_write);
-                            clients[i].fd = clients[i].id = 0;
-                            client_count--;
-                        }
-                    }
                 }
             }
         }
         if (game_over && client_count == 0) {
             target_num = (rand() % 100) + 1;
             game_over = 0;
+            max_fd = listen_fd;
         }
     }
 }
@@ -368,6 +315,87 @@ void accept_new_client(int *client_count, int* max_fd, fd_set* temp_set_read, fd
                     cleanup_and_exit(-1);
                 break;
             }
+        }
+    }
+}
+
+void handle_client_input(int i, fd_set *temp_set_read, fd_set *temp_set_write) {
+    char buffer[BUFFER_SIZE];
+    char num_buffer[20];
+    int bytes_read = read(clients[i].fd, num_buffer, sizeof(num_buffer));
+    if (bytes_read <= 0) {
+        // Client disconnected
+        close(clients[i].fd);
+        FD_CLR(clients[i].fd, temp_set_read);
+        FD_CLR(clients[i].fd, temp_set_write);
+        free_message_queue(&clients[i]);
+        client_count--;
+        sprintf(buffer, "Player %d disconnected\n", clients[i].id);
+        if (broadcast_message(clients, buffer, temp_set_write, max_fd, i) < 0)
+            cleanup_and_exit(-1);
+        clients[i].id = 0;
+        if (clients[i].fd == max_fd)
+            update_max_fd();
+        clients[i].fd = 0;
+    } else {
+        // Null-terminate the buffer
+        num_buffer[bytes_read] = '\0';
+
+        // Convert the string to an integer
+        int num = atoi(num_buffer);
+
+        sprintf(buffer, "Player %d guessed %d\n", clients[i].id, num);
+        if (broadcast_message(clients, buffer, temp_set_write, max_fd, -1) < 0)
+            cleanup_and_exit(-1);
+
+        if (num < target_num)
+            sprintf(buffer, "The guess %d is too low\n", num);
+        else if (num > target_num)
+            sprintf(buffer, "The guess %d is too high\n", num);
+        else
+            sprintf(buffer, "Player %d wins\n", clients[i].id);
+
+        if (broadcast_message(clients, buffer, temp_set_write, max_fd, -1) < 0)
+            cleanup_and_exit(-1);
+        // Notify all clients of the correct number
+        if (num == target_num) {
+            game_over = 1;
+            sprintf(buffer, "The correct guessing is %d\n", num);
+            if (broadcast_message(clients, buffer, temp_set_write, max_fd, -1) < 0) {
+                cleanup_and_exit(-1);
+            }
+        }
+    }
+}
+
+void send_message(int i, fd_set *temp_set_read, fd_set *temp_set_write) {
+    char *message = dequeue_message(&clients[i]);
+    if (message) {
+        write(clients[i].fd, message, strlen(message));
+        free(message);
+    }
+
+    if (!clients[i].queue) {
+        FD_CLR(clients[i].fd, temp_set_write);
+        if (game_over) {
+            close(clients[i].fd);
+            client_count--;
+            FD_CLR(clients[i].fd, temp_set_read);
+            FD_CLR(clients[i].fd, temp_set_write);
+            clients[i].id = 0;
+            if (clients[i].fd == max_fd)
+                update_max_fd();
+            clients[i].fd = 0;
+        }
+    }
+}
+
+void update_max_fd() {
+    max_fd = 0;
+    for (int i = 0; i < max_players; i++) {
+        if (clients[i].id > 0) {
+            if (clients[i].fd > max_fd)
+                max_fd = clients[i].fd;
         }
     }
 }
